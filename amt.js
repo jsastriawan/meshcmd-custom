@@ -300,6 +300,7 @@ function AmtStackCreateService(wsmanStack) {
     obj.CIM_AccountManagementService_CreateAccount = function (System, AccountTemplate, callback_func) { obj.Exec("CIM_AccountManagementService", "CreateAccount", { "System": System, "AccountTemplate": AccountTemplate }, callback_func); }
     obj.CIM_BootConfigSetting_ChangeBootOrder = function (Source, callback_func) { obj.Exec("CIM_BootConfigSetting", "ChangeBootOrder", { "Source": Source }, callback_func); }
     obj.CIM_BootService_SetBootConfigRole = function (BootConfigSetting, Role, callback_func) { obj.Exec("CIM_BootService", "SetBootConfigRole", { "BootConfigSetting": BootConfigSetting, "Role": Role }, callback_func, 0, 1); }
+    obj.CIM_BootService_RequestStateChange = function (RequestedState, TimeoutPeriod, callback_func, tag) { obj.Exec('CIM_BootService', 'RequestStateChange', { 'RequestedState': RequestedState, 'TimeoutPeriod': TimeoutPeriod }, callback_func, tag, 1); }
     obj.CIM_Card_ConnectorPower = function (Connector, PoweredOn, callback_func) { obj.Exec("CIM_Card", "ConnectorPower", { "Connector": Connector, "PoweredOn": PoweredOn }, callback_func); }
     obj.CIM_Card_IsCompatible = function (ElementToCheck, callback_func) { obj.Exec("CIM_Card", "IsCompatible", { "ElementToCheck": ElementToCheck }, callback_func); }
     obj.CIM_Chassis_IsCompatible = function (ElementToCheck, callback_func) { obj.Exec("CIM_Chassis", "IsCompatible", { "ElementToCheck": ElementToCheck }, callback_func); }
@@ -487,7 +488,7 @@ function AmtStackCreateService(wsmanStack) {
     function _GetMessageLog1(stack, name, responses, status, tag) {
         if (status != 200 || responses.Body["ReturnValue"] != '0') { tag[0](obj, null, tag[2], status); return; }
         var i, j, x, e, AmtMessages = tag[2], t = new Date(), TimeStamp, ra = responses.Body["RecordArray"];
-        if (typeof ra === 'string') { responses.Body["RecordArray"] = [responses.Body["RecordArray"]]; }
+        if (typeof ra === 'string') { ra = [ra]; }
 
         for (i in ra) {
             e = Buffer.from(ra[i], 'base64');
@@ -513,60 +514,98 @@ function AmtStackCreateService(wsmanStack) {
     var _SystemEntityTypes = "Unspecified|Other|Unknown|Processor|Disk|Peripheral|System management module|System board|Memory module|Processor module|Power supply|Add in card|Front panel board|Back panel board|Power system board|Drive backplane|System internal expansion board|Other system board|Processor board|Power unit|Power module|Power management board|Chassis back panel board|System chassis|Sub chassis|Other chassis board|Disk drive bay|Peripheral bay|Device bay|Fan cooling|Cooling unit|Cable interconnect|Memory device|System management software|BIOS|Intel(r) ME|System bus|Group|Intel(r) ME|External environment|Battery|Processing blade|Connectivity switch|Processor/memory module|I/O module|Processor I/O module|Management controller firmware|IPMI channel|PCI bus|PCI express bus|SCSI bus|SATA/SAS bus|Processor front side bus".split('|');
     obj.RealmNames = "||Redirection|PT Administration|Hardware Asset|Remote Control|Storage|Event Manager|Storage Admin|Agent Presence Local|Agent Presence Remote|Circuit Breaker|Network Time|General Information|Firmware Update|EIT|LocalUN|Endpoint Access Control|Endpoint Access Control Admin|Event Log Reader|Audit Log|ACL Realm|||Local System".split('|');
     obj.WatchdogCurrentStates = { 1: 'Not Started', 2: 'Stopped', 4: 'Running', 8: 'Expired', 16: 'Suspended' };
+    var _OCRProgressEvents = ["Boot parameters received from CSME", "CSME Boot Option % added successfully", "HTTPS URI name resolved", "HTTPS connected successfully", "HTTPSBoot download is completed", "Attempt to boot", "Exit boot services"];
+    var _OCRErrorEvents = ['', "No network connection available", "Name resolution of URI failed", "Connect to URI failed", "OEM app not found at local URI", "HTTPS TLS Auth failed", "HTTPS Digest Auth failed", "Verified boot failed (bad image)", "HTTPS Boot File not found"];
+    var _OCRSource = { 1: '', 2: "HTTPS", 4: "Local PBA", 8: "WinRE" };
 
     function _GetEventDetailStr(eventSensorType, eventOffset, eventDataField, entity) {
-
-        if (eventSensorType == 15)
-        {
+        if (eventSensorType == 15) {
             if (eventDataField[0] == 235) return "Invalid Data";
-            if (eventOffset == 0) return _SystemFirmwareError[eventDataField[1]];
-            return _SystemFirmwareProgress[eventDataField[1]];
+            if (eventOffset == 0) {
+                return _SystemFirmwareError[eventDataField[1]];
+            } else if (eventOffset == 3) {
+                if ((eventDataField[0] == 170) && (eventDataField[1] == 48)) {
+                    return format("One Click Recovery: {0}", _OCRErrorEvents[eventDataField[2]]);
+                } else if ((eventDataField[0] == 170) && (eventDataField[1] == 64)) {
+                    if (eventDataField[2] == 1) return "Got an error erasing Device SSD";
+                    if (eventDataField[2] == 2) return "Erasing Device TPM is not supported";
+                    if (eventDataField[2] == 3) return "Reached Max Counter";
+                } else {
+                    return "OEM Specific Firmware Error event";
+                }
+            } else if (eventOffset == 5) {
+                if ((eventDataField[0] == 170) && (eventDataField[1] == 48)) {
+                    if (eventDataField[2] == 1) {
+                        return format("One Click Recovery: CSME Boot Option {0}:{1} added successfully", (eventDataField[3]), _OCRSource[(eventDataField[3])]);
+                    } else if (eventDataField[2] < 7) {
+                        return format("One Click Recovery: {0}", _OCRProgressEvents[eventDataField[2]]);
+                    } else {
+                        return format("One Click Recovery: Unknown progress event {0}", eventDataField[2]);
+                    }
+                } else if ((eventDataField[0] == 170) && (eventDataField[1] == 64)) {
+                    if (eventDataField[2] == 1) {
+                        if (eventDataField[3] == 2) return "Started erasing Device SSD";
+                        if (eventDataField[3] == 3) return "Started erasing Device TPM";
+                        if (eventDataField[3] == 5) return "Started erasing Device BIOS Reload of Golden Config";
+                    }
+                    if (eventDataField[2] == 2) {
+                        if (eventDataField[3] == 2) return "Erasing Device SSD ended successfully";
+                        if (eventDataField[3] == 3) return "Erasing Device TPM ended successfully";
+                        if (eventDataField[3] == 5) return "Erasing Device BIOS Reload of Golden Config ended successfully";
+                    }
+                    if (eventDataField[2] == 3) return "Beginning Platform Erase";
+                    if (eventDataField[2] == 4) return "Clear Reserved Parameters";
+                    if (eventDataField[2] == 5) return "All setting decremented";
+                } else {
+                    return "OEM Specific Firmware Progress event";
+                }
+            } else {
+                return _SystemFirmwareProgress[eventDataField[1]];
+            }
         }
 
-        if (eventSensorType == 18 && eventDataField[0] == 170) // System watchdog event
+        if ((eventSensorType == 18) && (eventDataField[0] == 170)) // System watchdog event
         {
             return "Agent watchdog " + char2hex(eventDataField[4]) + char2hex(eventDataField[3]) + char2hex(eventDataField[2]) + char2hex(eventDataField[1]) + "-" + char2hex(eventDataField[6]) + char2hex(eventDataField[5]) + "-... changed to " + obj.WatchdogCurrentStates[eventDataField[7]];
         }
 
-        //if (eventSensorType == 5 && eventOffset == 0) // System chassis
-        //{
-        //    return "Case intrusion";
-        //}
+        if ((eventSensorType == 5) && (eventOffset == 0)) // System chassis
+        {
+            return "Case intrusion";
+        }
 
-        //if (eventSensorType == 192 && eventOffset == 0 && eventDataField[0] == 170 && eventDataField[1] == 48)
-        //{
-        //    if (eventDataField[2] == 0) return "A remote Serial Over LAN session was established.";
-        //    if (eventDataField[2] == 1) return "Remote Serial Over LAN session finished. User control was restored.";
-        //    if (eventDataField[2] == 2) return "A remote IDE-Redirection session was established.";
-        //    if (eventDataField[2] == 3) return "Remote IDE-Redirection session finished. User control was restored.";
-        //}
+        if ((eventSensorType == 192) && (eventOffset == 0) && (eventDataField[0] == 170) && (eventDataField[1] == 48))
+        {
+            if (eventDataField[2] == 0) return "A remote Serial Over LAN session was established.";
+            if (eventDataField[2] == 1) return "Remote Serial Over LAN session finished. User control was restored.";
+            if (eventDataField[2] == 2) return "A remote IDE-Redirection session was established.";
+            if (eventDataField[2] == 3) return "Remote IDE-Redirection session finished. User control was restored.";
+        }
 
-        //if (eventSensorType == 36)
-        //{
-        //    long handle = ((long)(eventDataField[1]) << 24) + ((long)(eventDataField[2]) << 16) + ((long)(eventDataField[3]) << 8) + (long)(eventDataField[4]);
-        //    string nic = string.Format("#{0}", eventDataField[0]);
-        //    if (eventDataField[0] == 0xAA) nic = "wired"; // TODO: Add wireless *****
-        //    //if (eventDataField[0] == 0xAA) nic = "wireless";
+        if (eventSensorType == 36)
+        {
+            var handle = (eventDataField[1] << 24) + (eventDataField[2] << 16) + (eventDataField[3] << 8) + eventDataField[4];
+            var nic = '#' + eventDataField[0];
+            if (eventDataField[0] == 0xAA) nic = "wired"; // TODO: Add wireless *****
+            //if (eventDataField[0] == 0xAA) nic = "wireless";
 
-        //    if (handle == 4294967293) { return string.Format("All received packet filter was matched on {0} interface.", nic); }
-        //    if (handle == 4294967292) { return string.Format("All outbound packet filter was matched on {0} interface.", nic); }
-        //    if (handle == 4294967290) { return string.Format("Spoofed packet filter was matched on {0} interface.", nic); }
-        //    return string.Format("Filter {0} was matched on {1} interface.", handle, nic);
-        //}
+            if (handle == 4294967293) { return "All received packet filter was matched on " + nic + " interface."; }
+            if (handle == 4294967292) { return "All outbound packet filter was matched on " + nic + " interface."; }
+            if (handle == 4294967290) { return "Spoofed packet filter was matched on " + nic + " interface."; }
+            return "Filter " + handle + " was matched on " + nic + " interface.";
+        }
 
-        //if (eventSensorType == 192)
-        //{
-        //    if (eventDataField[2] == 0) return "Security policy invoked. Some or all network traffic (TX) was stopped.";
-        //    if (eventDataField[2] == 2) return "Security policy invoked. Some or all network traffic (RX) was stopped.";
-        //    return "Security policy invoked.";
-        //}
+        if (eventSensorType == 192) {
+            if (eventDataField[2] == 0) return "Security policy invoked. Some or all network traffic (TX) was stopped.";
+            if (eventDataField[2] == 2) return "Security policy invoked. Some or all network traffic (RX) was stopped.";
+            return "Security policy invoked.";
+        }
 
-        //if (eventSensorType == 193)
-        //{
-        //    if (eventDataField[0] == 0xAA && eventDataField[1] == 0x30 && eventDataField[2] == 0x00 && eventDataField[3] == 0x00) { return "User request for remote connection."; }
-        //    if (eventDataField[0] == 0xAA && eventDataField[1] == 0x20 && eventDataField[2] == 0x03 && eventDataField[3] == 0x01) { return "EAC error: attempt to get posture while NAC in Intel(r) AMT is disabled."; // eventDataField = 0xAA20030100000000 }
-        //    if (eventDataField[0] == 0xAA && eventDataField[1] == 0x20 && eventDataField[2] == 0x04 && eventDataField[3] == 0x00) { return "Certificate revoked. "; }
-        //}
+        if (eventSensorType == 193) {
+            if ((eventDataField[0] == 0xAA) && (eventDataField[1] == 0x30) && (eventDataField[2] == 0x00) && (eventDataField[3] == 0x00)) { return "User request for remote connection."; }
+            if ((eventDataField[0] == 0xAA) && (eventDataField[1] == 0x20) && (eventDataField[2] == 0x03) && (eventDataField[3] == 0x01)) { return "EAC error: attempt to get posture while NAC in Intel(r) AMT is disabled."; } // eventDataField = 0xAA20030100000000
+            if ((eventDataField[0] == 0xAA) && (eventDataField[1] == 0x20) && (eventDataField[2] == 0x04) && (eventDataField[3] == 0x00)) { return "Certificate revoked. "; }
+        }
 
         if (eventSensorType == 6) return "Authentication failed " + (eventDataField[1] + (eventDataField[2] << 8)) + " times. The system may be under attack.";
         if (eventSensorType == 30) return "No bootable media";
@@ -670,9 +709,12 @@ function AmtStackCreateService(wsmanStack) {
         2600: 'Agent Watchdog Added',
         2601: 'Agent Watchdog Removed',
         2602: 'Agent Watchdog Action Set',
-        2700: 'Wireless Profile Added',
-        2701: 'Wireless Profile Removed',
-        2702: 'Wireless Profile Updated',
+        2700: "Wireless Profile Added",
+        2701: "Wireless Profile Removed",
+        2702: "Wireless Profile Updated",
+        2703: "An existing profile sync was modified",
+        2704: "An existing profile link preference was changed",
+        2705: "Wireless profile share with UEFI enabled setting was changed",
         2800: 'EAC Posture Signer SET',
         2801: 'EAC Enabled',
         2802: 'EAC Disabled',
@@ -771,7 +813,6 @@ function AmtStackCreateService(wsmanStack) {
                 // Read network access
                 x['MCLocationType'] = e[ptr++];
                 var netlen = e[ptr++];
-
                 x['NetAddress'] = e.slice(ptr, ptr + netlen).toString();
 
                 // Read extended data
@@ -986,8 +1027,8 @@ function AmtStackCreateService(wsmanStack) {
 
     // Convert a byte array of SID into string
     function GetSidString(sid) {
-        var r = "S-" + sid.charCodeAt(0) + "-" + sid.charCodeAt(7);
-        for (var i = 2; i < (sid.length / 4); i++) r += "-" + ReadIntX(sid, i * 4);
+        var r = 'S-' + sid[0] + '-' + sid[7];
+        for (var i = 2; i < (sid.length / 4); i++) r += '-' + ReadIntX(sid, i * 4);
         return r;
     }
 

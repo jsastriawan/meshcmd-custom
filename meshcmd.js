@@ -204,6 +204,7 @@ function run(argv) {
         console.log('  AmtScan           - Search local network for Intel AMT devices.');
         console.log('  AmtWifi           - Intel AMT Wifi interface settings.');
         console.log('  AmtWake           - Intel AMT Wake Alarms.');
+        console.log('  AmtCert           - Manage Certificates in Intel AMT certificate storage.');
         console.log('\r\nHelp on a specific action using:\r\n');
         console.log('  meshcmd help [action]');
         exit(1); return;
@@ -301,16 +302,17 @@ function run(argv) {
             console.log('  --pass [password]      The Intel AMT login password.');
             console.log('  --agent [uuid]         The unique identifier of the watchdog agent.');
         } else if (action == 'amtpower') {
-            console.log('AmtPower will get current pwoer state or send a reboot command to a remote Intel AMT device. Example usage:\r\n\r\n  meshcmd amtpower --reset --host 1.2.3.4 --user admin --pass mypassword --tls');
+            console.log('AmtPower will get current power state or send a reboot command to a remote Intel AMT device. Example usage:\r\n\r\n  meshcmd amtpower --reset --host 1.2.3.4 --user admin --pass mypassword --tls');
             console.log('\r\nRequired arguments:\r\n');
             console.log('  --host [hostname]      The IP address or DNS name of Intel AMT.');
             console.log('  --pass [password]      The Intel AMT login password.');
             console.log('\r\nOptional arguments:\r\n');
             console.log('  --reset, --poweron, --poweroff, --powercycle, --sleep, --hibernate');
-            console.log('  --user [username]            The Intel AMT login username, admin is default.');
-            console.log('  --tls                        Specifies that TLS must be used.');
-            console.log('  --bootdevice [pxe|hdd|cd]    Specifies the boot device to use after reset, poweron or powercycle.');
-            console.log('  --bootindex [number]         Specifies the index of boot device to use.');
+            console.log('  --user [username]                The Intel AMT login username, admin is default.');
+            console.log('  --tls                            Specifies that TLS must be used.');
+            console.log('  --bootdevice [pxe|hdd|cd|http]   Specifies the boot device to use after reset, poweron or powercycle.');
+            console.log('  --bootindex [number]             Specifies the index of boot device to use.');
+            console.log('  --booturl [url]                  Specifies HTTPS URL to boot from.');
         } else if (action == 'amtnetwork') {
             console.log('AmtNetwork is used to get/set Intel AMT network interface configuration. Example usage:\r\n\r\n  meshcmd amtnetwork --host 1.2.3.4 --user admin --pass mypassword --dhcp');
             console.log('\r\nRequired arguments:\r\n');
@@ -414,6 +416,19 @@ function run(argv) {
             console.log('     --interval (dd-hh-mm)  Optional alarm interval in days-hours-minutes format, default is alarm once.');
             console.log('     --deletewhendone       Indicates alarm is removed once triggered, default is to no remove.');
             console.log('  --del [alarm-name]        Remove a wake alarm');
+        } else if (action == 'amtcert') {
+            console.log("AmtCert is used to list/add/remove certificates stored by AMT. Example usage:\r\n\r\n meshcmd amtcert --host 1.2.3.4 --user admin --pass mypassword --list");
+            console.log('\r\nRequired arguments:\r\n');
+            console.log('  --host [hostname]         The IP address or DNS name of Intel AMT, 127.0.0.1 is default.');
+            console.log('  --pass [password]         The Intel AMT login password.');
+            console.log('  --[action]                Action options are list, add-trusted, add, del.');
+            console.log('\r\nOptional arguments:\r\n');
+            console.log('  --user [username]         The Intel AMT login username, admin is default.');
+            console.log('  --tls                     Specifies that TLS must be used.');
+            console.log('  --list                    List stored certificates');
+            console.log('  --add [pemfile]           Add new certificate');
+            console.log('  --addtrusted [pemfile]    Add new reusted certificate');
+            console.log('  --del [certname]          Remove certificate named certname');
         } else {
             actions.shift();
             console.log('Invalid action, usage:\r\n\r\n  meshcmd help [action]\r\n\r\nValid actions are: ' + actions.join(', ') + '.');
@@ -754,6 +769,18 @@ function run(argv) {
             if (((typeof args.date != 'string') || args.data == '')) { console.log("Wake alarm date is required (--date [yyyy-mm-dd])."); exit(1); return; }
         }
         performAmtWakeConfig(args);
+    } else if (settings.action == 'amtcert') {
+        if (settings.hostname == null) { settings.hostname = '127.0.0.1'; }
+        if ((settings.password == null) || (typeof settings.password != 'string') || (settings.password == '')) { console.log('No or invalid \"password\" specified, use --password [password].'); exit(1); return; }
+        if ((settings.username == null) || (typeof settings.username != 'string') || (settings.username == '')) { settings.username = 'admin'; }
+        if ((args.del != null) && ((typeof args.del != 'string') || args.del == '')) { console.log("Certificate name is required (--del [name])."); exit(1); return; }
+        if (args.addtrusted != null) {
+            if (((typeof args.addtrusted != 'string') || args.addtrusted == '')) { console.log("Certificate file is required (--addtrusted [name])."); exit(1); return; }
+        }
+        if (args.add != null) {
+            if (((typeof args.add != 'string') || args.add == '')) { console.log("Certificate file is required (--add [name])."); exit(1); return; }
+        }
+        performAmtCertConfig(args);
     } else if (settings.action == 'amtfeatures') { // Perform remote Intel AMT feature configuration operation
         if (settings.hostname == null) { settings.hostname = '127.0.0.1'; }
         if ((settings.password == null) || (typeof settings.password != 'string') || (settings.password == '')) { console.log('No or invalid \"password\" specified, use --password [password].'); exit(1); return; }
@@ -2623,6 +2650,139 @@ function performAmtWakeConfig1(stack, name, response, status, args) {
     }
 }
 
+//
+// Intel AMT certificate management
+//
+
+function performAmtCertConfig(args) {
+    if ((settings.hostname == '127.0.0.1') || (settings.hostname.toLowerCase() == 'localhost')) {
+        settings.noconsole = true; startLms(performAmtCertConfig0, false, args);
+    } else {
+        performAmtCertConfig0(1, args);
+    }
+}
+
+function performAmtCertConfig0(state, args) {
+    var transport = require('amt-wsman-duk');
+    var wsman = require('amt-wsman');
+    var amt = require('amt');
+    wsstack = new wsman(transport, settings.hostname, settings.tls ? 16993 : 16992, settings.username, settings.password, settings.tls);
+    amtstack = new amt(wsstack);
+    amtstack.BatchEnum(null, ['AMT_PublicKeyCertificate'], performAmtCertConfig1, args);
+}
+
+function getCN(subject) {
+    if (subject !=null && typeof(subject) == 'string') {
+        var str_arr = subject.split(',');
+        for (var i=0; i< str_arr.length;i++) {
+            if (str_arr[i].startsWith("CN=")) {
+                return str_arr[i].substring(3).trim()
+            }
+        }
+    }
+    return ""
+}
+
+function performAmtCertConfig1(stack, name, response, status, args) {
+    if (status == 200) {
+        var response = response['AMT_PublicKeyCertificate'].responses;
+        if (!args) { process.exit(0); return; }
+        if (args.list) {
+            //console.log(JSON.stringify(response,"",3))
+            if (response.length == 0) {
+                console.log("No certificate is stored in AMT.")
+            } else {
+                console.log("List of certificates in AMT certificate storage.")
+                console.log("------------------------------------------------")
+                for (var i=0; i< response.length; i++) {
+                    var trusted = response[i]["TrustedRootCertficate"];
+                    var certname = getCN(response[i]["Subject"]);                    
+                    console.log(certname + (trusted? " (trusted)": ""));
+                }
+            }
+            process.exit(0);
+        } else if (args.del) {
+            if (response.length == 0) {
+                console.log("Certificate "+ args.del +" is not found.")
+                process.exit(0)
+            } else {
+                //console.log(JSON.stringify(response,"",3))
+                var cert_instance = null
+                for (var i=0; i< response.length; i++) {
+                    var certname = getCN(response[i]["Subject"]);
+                    if (certname == args.del) {
+                        cert_instance = response[i]
+                    }
+                }
+                if (cert_instance != null) {
+                    stack.Delete('AMT_PublicKeyCertificate', cert_instance, function (stck, nm, resp, sts) {
+                        if (sts == 200) {
+                            console.log("Certificate " + args.del + " successfully deleted.");
+                        } else {
+                            console.log("Failed to delete certificate " + args.del + ".");
+                        }
+                        process.exit(0);
+                    }, 0, 1);
+                } else {
+                    console.log("Certificate "+ args.del +" is not found.")
+                    process.exit(0);
+                }
+            }            
+        } else if (args.addtrusted) {
+            var certbin = ""
+            try {
+                certbin = fs.readFileSync(args.addtrusted).toString();
+            } catch (e) {
+                console.log(e)
+                process.exit(-1)
+            }
+            var i = certbin.indexOf('-----BEGIN CERTIFICATE-----');
+            if (i >= 0) {
+                certbin = certbin.substring(i + 27);
+                i = certbin.indexOf('-----END CERTIFICATE-----');
+                if (i >= 0) certbin = certbin.substring(0, i)
+                certbin = certbin.replace(/\r\n/g, '');
+                amtstack.AMT_PublicKeyManagementService_AddTrustedRootCertificate(certbin, function (stck, nm, resp, sts) {
+                    if (sts == 200) {
+                        console.log("Certificate " + args.addtrusted + " successfully added.");
+                    } else {
+                        console.log("Failed to add certificate " + args.addtrusted + ".");
+                    }
+                    process.exit(0);
+                });                
+            }
+        } else if (args.add) {
+            var certbin = ""
+            try {
+                certbin = fs.readFileSync(args.add).toString();
+            } catch (e) {
+                console.log(e)
+                process.exit(-1)
+            }
+            var i = certbin.indexOf('-----BEGIN CERTIFICATE-----');
+            if (i >= 0) {
+                certbin = certbin.substring(i + 27);
+                i = certbin.indexOf('-----END CERTIFICATE-----');
+                if (i >= 0) certbin = certbin.substring(0, i)
+                certbin = certbin.replace(/\r\n/g, '');
+                amtstack.AMT_PublicKeyManagementService_AddCertificate(certbin, function (stck, nm, resp, sts) {
+                    if (sts == 200) {
+                        console.log("Certificate " + args.add + " successfully added.");
+                    } else {
+                        console.log("Failed to add certificate " + args.add + ".");
+                    }
+                    process.exit(0);
+                });
+            }            
+        } else {
+            console.log("Unknown action, specify --list, --del, --addtrusted or --add.");
+            process.exit(0);
+        }
+    } else {
+        console.log("Error, status " + status + ".");
+        process.exit(1);
+    }
+}
 //
 // Intel AMT feature configuration action
 //
