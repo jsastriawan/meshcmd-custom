@@ -818,15 +818,25 @@ function run(argv) {
         if (args.reset) { settings.poweraction = 10; }
         //if (settings.poweraction == 0) { console.log('No power action, specify --poweron, --sleep, --powercycle, --poweroff, --hibernate, --reset.'); exit(1); return; }
         // Accepted option for boot device are: pxe, hdd, cd 
-        var bootdevices = ['pxe','hdd','cd'];       
+        var bootdevices = ['pxe','hdd','cd','http'];       
         if (args.bootdevice) {
             console.log() 
             if (bootdevices.indexOf(args.bootdevice.toLowerCase())>=0) {
-                settings.bootdevice = args.bootdevice
+                settings.bootdevice = args.bootdevice.toLowerCase()
                 // set bootindex to 0 by default, unless overriden
                 settings.bootindex = 0
             } else {
-                console.log('Supported boot devices are pxe, hdd, cd'); exit(1); return; 
+                console.log('Supported boot devices are pxe, hdd, cd, http'); exit(1); return; 
+            }
+            // check args.booturl for http
+            if (settings.bootdevice == 'http') {
+                if ( args.booturl != null && args.booturl.trim() != "") {
+                    settings.booturl = args.booturl.trim();
+                } else {
+                    console.log("HTTP boot requires a valid --booturl parameter.")
+                    process.exit(-1);
+
+                }
             }
         }
         // boot index for cd and hdd
@@ -2938,12 +2948,74 @@ function powerActionResponse1(stack, name, response, status) {
     delete r['BIOSLastStatus'];
     delete r['UefiBootParametersArray'];
     if (r['UefiBootNumberOfParams'] != null) r['UefiBootNumberOfParams'] = 0;
+    // set Uefi Boot Parameters
+    if (settings.bootdevice=='http') {
+        var bootparamscount = 3;
+        var uefiParams = makeUefiBootParam(1, settings.booturl) + makeUefiBootParam(20, 1, 1) + makeUefiBootParam(30, 0, 2);
+        r['UefiBootParametersArray'] = btoa(uefiParams);
+        if (globalDebugFlags==1) {
+            console.log("UefiBootParametersArray: "+ r['UefiBootParametersArray'])
+        } 
+        r['UefiBootNumberOfParams'] = bootparamscount;
+    }
     // Set the boot order to null, this is needed for some AMT versions that don't clear this automatically.
     amtstack.CIM_BootConfigSetting_ChangeBootOrder(null, function (stack, name, response, status) {
         if (status != 200) { console.log('PUT CIM_BootConfigSetting_ChangeBootOrder failed'); exit(1); return; }
-        if (response.Body['ReturnValue'] != 0) { console.log('(1) Change Boot Order returns '+ response.Body.ReturnValueStr); exit(1); return; }
+        if (response.Body['ReturnValue'] != 0) { console.log('(1) Change Boot Order returns code '+ resp.Body['ReturnValue']); exit(1); return; }
         amtstack.Put('AMT_BootSettingData', r, powerActionResponse2, 0, 1);
     }, 0, 1);
+}
+// common utilities
+function btoa(s) {
+    const keystr = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    for (i = 0; i < s.length; i++) {
+        if (s.charCodeAt(i) > 255) {
+            return null;
+        }
+    }
+    var out = "";
+    for (i = 0; i < s.length; i += 3) {
+        const groupsOfSix = [undefined, undefined, undefined, undefined];
+        groupsOfSix[0] = s.charCodeAt(i) >> 2;
+        groupsOfSix[1] = (s.charCodeAt(i) & 0x03) << 4;
+        if (s.length > i + 1) {
+            groupsOfSix[1] |= s.charCodeAt(i + 1) >> 4;
+            groupsOfSix[2] = (s.charCodeAt(i + 1) & 0x0f) << 2;
+        }
+        if (s.length > i + 2) {
+            groupsOfSix[2] |= s.charCodeAt(i + 2) >> 6;
+            groupsOfSix[3] = s.charCodeAt(i + 2) & 0x3f;
+        }
+        for (var j = 0; j < groupsOfSix.length; j++) {
+            if (typeof groupsOfSix[j] === "undefined") {
+                out += "=";
+            } else {
+                out += keystr[groupsOfSix[j]];
+            }
+        }
+    }
+    return out;
+}
+
+function IntToStrX(v) { 
+    return String.fromCharCode(v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, (v >> 24) & 0xFF); 
+}
+function ShortToStrX(v) { 
+    return String.fromCharCode(v & 0xFF) + String.fromCharCode((v >> 8) & 0xFF); 
+}
+
+function makeUefiBootParam(type, data, len, vendorid) {
+    if (typeof data == 'number') { 
+        if (len == 1) {            
+            data = String.fromCharCode(data & 0xFF);            
+        } else if (len == 2) { 
+            data = ShortToStrX(data); 
+        } else if (len == 4) { 
+            data = IntToStrX(data); 
+        } 
+    }
+    return ShortToStrX(vendorid ? vendorid : 0x8086) + ShortToStrX(type) + IntToStrX(data.length) + data;
 }
 
 function powerActionResponse2(stack, name, response, status, tag) {
@@ -2953,10 +3025,10 @@ function powerActionResponse2(stack, name, response, status, tag) {
 
 function powerActionResponse3(stack, name, response, status) {
     if (status != 200) { console.log('SetBootConfigRole failed.'); exit(1); return; }
-    var bootsources = { 'pxe' : 'Force PXE Boot', 'hdd' : 'Force Hard-drive Boot', 'cd' : 'Force CD/DVD Boot'};
+    var bootsources = { 'pxe' : 'Force PXE Boot', 'hdd' : 'Force Hard-drive Boot', 'cd' : 'Force CD/DVD Boot', 'http' : 'Force OCR UEFI HTTPS Boot'};
     var cbparam='<Address xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing">http://schemas.xmlsoap.org/ws/2004/08/addressing</Address><ReferenceParameters xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing"><ResourceURI xmlns="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd">http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_BootSourceSetting</ResourceURI><SelectorSet xmlns="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd"><Selector Name="InstanceID">Intel(r) AMT: ' + bootsources[settings.bootdevice] + '</Selector></SelectorSet></ReferenceParameters>';
     amtstack.CIM_BootConfigSetting_ChangeBootOrder(cbparam, function(st, nm, resp, sts) {
-        if (resp.Body['ReturnValue'] != 0) { console.log('(2) Change Boot Order returns '+ response.Body.ReturnValueStr); exit(1); return; }
+        if (resp.Body['ReturnValue'] != 0) { console.log('(2) Change Boot Order returns code '+ resp.Body['ReturnValue']); exit(1); return; }
         amtstack.RequestPowerStateChange(settings.poweraction, performAmtPowerActionEx);
     });
 }
