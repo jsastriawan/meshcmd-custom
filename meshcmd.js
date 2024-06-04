@@ -813,7 +813,7 @@ function run(argv) {
         if (args.poweron) { settings.poweraction = 2; }
         if (args.sleep) { settings.poweraction = 3; }
         if (args.powercycle) { settings.poweraction = 5; }
-        if (args.poweroff) { settings.poweraction = 6; }
+        if (args.poweroff) { settings.poweraction = 8; }
         if (args.hibernate) { settings.poweraction = 7; }
         if (args.reset) { settings.poweraction = 10; }
         //if (settings.poweraction == 0) { console.log('No power action, specify --poweron, --sleep, --powercycle, --poweroff, --hibernate, --reset.'); exit(1); return; }
